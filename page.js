@@ -1,68 +1,167 @@
-import Link from "next/link";
-import PulseLine from "../components/PulseLine";
+"use client";
 
-export default function Home() {
+import { useState } from "react";
+
+const RADIUS_OPTIONS = [
+  { label: "1 km", value: 1000 },
+  { label: "3 km", value: 3000 },
+  { label: "5 km", value: 5000 },
+  { label: "10 km", value: 10000 },
+];
+
+function toRad(value) {
+  return (value * Math.PI) / 180;
+}
+
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+export default function ClinicsPage() {
+  const [radius, setRadius] = useState(3000);
+  const [status, setStatus] = useState("idle");
+  const [clinics, setClinics] = useState([]);
+  const [error, setError] = useState("");
+
+  function findClinics() {
+    if (typeof window === "undefined" || !navigator.geolocation) {
+      setError("Geolocation is not supported in this browser.");
+      return;
+    }
+
+    setStatus("locating");
+    setError("");
+    setClinics([]);
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const { latitude, longitude } = position.coords;
+        setStatus("searching");
+
+        const query = `
+          [out:json][timeout:25];
+          (
+            node["amenity"~"^(clinic|hospital|doctors|pharmacy)$"](around:${radius},${latitude},${longitude});
+            way["amenity"~"^(clinic|hospital|doctors|pharmacy)$"](around:${radius},${latitude},${longitude});
+          );
+          out center 30;
+        `;
+
+        try {
+          const res = await fetch("https://overpass-api.de/api/interpreter", {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: query,
+          });
+
+          if (!res.ok) {
+            throw new Error("Could not reach the clinic directory. Please try again.");
+          }
+
+          const data = await res.json();
+
+          const results = (data.elements || [])
+            .map((el) => {
+              const lat = el.lat ?? el.center?.lat;
+              const lon = el.lon ?? el.center?.lon;
+              if (lat == null || lon == null) return null;
+
+              return {
+                id: el.id,
+                name: el.tags?.name || "Unnamed clinic",
+                type: el.tags?.amenity,
+                address:
+                  [el.tags?.["addr:street"], el.tags?.["addr:housenumber"], el.tags?.["addr:city"]]
+                    .filter(Boolean)
+                    .join(", ") || "Address not listed",
+                distance: distanceKm(latitude, longitude, lat, lon),
+                lat,
+                lon,
+              };
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.distance - b.distance)
+            .slice(0, 20);
+
+          setClinics(results);
+          setStatus("done");
+        } catch (err) {
+          setError(err.message || "Something went wrong while searching for clinics.");
+          setStatus("error");
+        }
+      },
+      () => {
+        setError("Location access was denied. Please allow location access and try again.");
+        setStatus("error");
+      }
+    );
+  }
+
   return (
     <main className="shell">
-      <section className="hero">
-        <span className="eyebrow">All-in-one virtual health platform</span>
-        <h1>One pulse. Three kinds of care.</h1>
-        <p className="lead">
-          HealthPal gives you instant AI-powered medical guidance, an
-          empathetic AI therapist you can talk to out loud, and a live map
-          of clinics near you, every reading on one chart.
+      <div className="tool-header">
+        <span className="eyebrow">Find Clinics</span>
+        <h1>What is open near you.</h1>
+        <p>
+          HealthPal uses your location to find nearby clinics, hospitals,
+          doctors, and pharmacies, sorted by distance.
         </p>
-      </section>
+      </div>
 
-      <PulseLine />
+      <div className="locate-row">
+        <select
+          className="radius-select"
+          value={radius}
+          onChange={(e) => setRadius(Number(e.target.value))}
+        >
+          {RADIUS_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              Within {opt.label}
+            </option>
+          ))}
+        </select>
+        <button className="btn btn-coral" onClick={findClinics} disabled={status === "locating" || status === "searching"}>
+          {status === "locating" || status === "searching" ? "Searching..." : "Use my location"}
+        </button>
+      </div>
 
-      <section className="card-grid">
-        <Link href="/medical" className="service-card">
-          <div className="icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z" />
-            </svg>
-          </div>
-          <h3>Medical AI</h3>
-          <p>
-            Describe your symptoms in plain language and get clear,
-            conversational guidance powered by AI, available any hour.
-          </p>
-          <span className="go">Start a consult →</span>
-        </Link>
+      {status === "locating" && <p className="status-line">Getting your location...</p>}
+      {status === "searching" && <p className="status-line">Searching nearby clinics...</p>}
+      {status === "done" && (
+        <p className="status-line">
+          {clinics.length > 0
+            ? "Found " + clinics.length + " place(s) within " + (radius / 1000) + " km."
+            : "No clinics found in this radius. Try a larger radius."}
+        </p>
+      )}
+      {error && <p className="status-line">{error}</p>}
 
-        <Link href="/therapist" className="service-card">
-          <div className="icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-              <line x1="12" x2="12" y1="19" y2="23" />
-              <line x1="8" x2="16" y1="23" y2="23" />
-            </svg>
-          </div>
-          <h3>Therapist AI</h3>
-          <p>
-            Talk through how you are feeling with a calm digital therapist.
-            Speak out loud and hear it respond with empathetic speech.
-          </p>
-          <span className="go">Start a session →</span>
-        </Link>
-
-        <Link href="/clinics" className="service-card">
-          <div className="icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
-              <circle cx="12" cy="10" r="3" />
-            </svg>
-          </div>
-          <h3>Find Clinics</h3>
-          <p>
-            Share your location and instantly see nearby clinics and
-            hospitals, sorted by distance, on a live readout.
-          </p>
-          <span className="go">Find nearby care →</span>
-        </Link>
-      </section>
+      <div className="clinic-list">
+        {clinics.map((c) => (
+          <a
+            key={c.id}
+            className="clinic-card"
+            href={"https://www.openstreetmap.org/?mlat=" + c.lat + "&mlon=" + c.lon + "#map=18/" + c.lat + "/" + c.lon}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <div>
+              <div className="name">{c.name}</div>
+              <div className="meta">
+                {c.type ? c.type.charAt(0).toUpperCase() + c.type.slice(1) : "Clinic"} · {c.address}
+              </div>
+            </div>
+            <div className="distance">{c.distance.toFixed(1)} km</div>
+          </a>
+        ))}
+      </div>
     </main>
   );
 }
