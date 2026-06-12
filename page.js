@@ -1,167 +1,193 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-const RADIUS_OPTIONS = [
-  { label: "1 km", value: 1000 },
-  { label: "3 km", value: 3000 },
-  { label: "5 km", value: 5000 },
-  { label: "10 km", value: 10000 },
-];
+const WELCOME =
+  "Hi, I am glad you are here. This is a calm space to talk through whatever is on your mind. You can type, or tap the microphone and speak to me. How are you feeling today?";
 
-function toRad(value) {
-  return (value * Math.PI) / 180;
-}
-
-function distanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-export default function ClinicsPage() {
-  const [radius, setRadius] = useState(3000);
-  const [status, setStatus] = useState("idle");
-  const [clinics, setClinics] = useState([]);
+export default function TherapistPage() {
+  const [messages, setMessages] = useState([
+    { role: "assistant", content: WELCOME },
+  ]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [listening, setListening] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(true);
+  const [speakEnabled, setSpeakEnabled] = useState(true);
 
-  function findClinics() {
-    if (typeof window === "undefined" || !navigator.geolocation) {
-      setError("Geolocation is not supported in this browser.");
+  const scrollRef = useRef(null);
+  const recognitionRef = useRef(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, loading]);
+
+  useEffect(() => {
+    const SpeechRecognition =
+      typeof window !== "undefined" &&
+      (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+    if (!SpeechRecognition) {
+      setVoiceSupported(false);
       return;
     }
 
-    setStatus("locating");
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setInput((prev) => (prev ? prev + " " + transcript : transcript));
+    };
+
+    recognition.onend = () => setListening(false);
+    recognition.onerror = () => setListening(false);
+
+    recognitionRef.current = recognition;
+  }, []);
+
+  function toggleListening() {
+    if (!recognitionRef.current) return;
+    if (listening) {
+      recognitionRef.current.stop();
+      setListening(false);
+    } else {
+      setListening(true);
+      recognitionRef.current.start();
+    }
+  }
+
+  function speak(text) {
+    if (!speakEnabled) return;
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.98;
+    utterance.pitch = 1.02;
+    window.speechSynthesis.speak(utterance);
+  }
+
+  async function sendMessage() {
+    const text = input.trim();
+    if (!text || loading) return;
+
+    const nextMessages = [...messages, { role: "user", content: text }];
+    setMessages(nextMessages);
+    setInput("");
+    setLoading(true);
     setError("");
-    setClinics([]);
 
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const { latitude, longitude } = position.coords;
-        setStatus("searching");
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "therapist",
+          messages: nextMessages.map(({ role, content }) => ({ role, content })),
+        }),
+      });
+      const data = await res.json();
 
-        const query = `
-          [out:json][timeout:25];
-          (
-            node["amenity"~"^(clinic|hospital|doctors|pharmacy)$"](around:${radius},${latitude},${longitude});
-            way["amenity"~"^(clinic|hospital|doctors|pharmacy)$"](around:${radius},${latitude},${longitude});
-          );
-          out center 30;
-        `;
-
-        try {
-          const res = await fetch("https://overpass-api.de/api/interpreter", {
-            method: "POST",
-            headers: { "Content-Type": "text/plain" },
-            body: query,
-          });
-
-          if (!res.ok) {
-            throw new Error("Could not reach the clinic directory. Please try again.");
-          }
-
-          const data = await res.json();
-
-          const results = (data.elements || [])
-            .map((el) => {
-              const lat = el.lat ?? el.center?.lat;
-              const lon = el.lon ?? el.center?.lon;
-              if (lat == null || lon == null) return null;
-
-              return {
-                id: el.id,
-                name: el.tags?.name || "Unnamed clinic",
-                type: el.tags?.amenity,
-                address:
-                  [el.tags?.["addr:street"], el.tags?.["addr:housenumber"], el.tags?.["addr:city"]]
-                    .filter(Boolean)
-                    .join(", ") || "Address not listed",
-                distance: distanceKm(latitude, longitude, lat, lon),
-                lat,
-                lon,
-              };
-            })
-            .filter(Boolean)
-            .sort((a, b) => a.distance - b.distance)
-            .slice(0, 20);
-
-          setClinics(results);
-          setStatus("done");
-        } catch (err) {
-          setError(err.message || "Something went wrong while searching for clinics.");
-          setStatus("error");
-        }
-      },
-      () => {
-        setError("Location access was denied. Please allow location access and try again.");
-        setStatus("error");
+      if (!res.ok) {
+        setError(data.error || "Something went wrong. Please try again.");
+        setLoading(false);
+        return;
       }
-    );
+
+      setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
+      speak(data.reply);
+    } catch (err) {
+      setError("Network error. Please check your connection and try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
   }
 
   return (
     <main className="shell">
       <div className="tool-header">
-        <span className="eyebrow">Find Clinics</span>
-        <h1>What is open near you.</h1>
+        <span className="eyebrow">Therapist AI</span>
+        <h1>A space to talk it through.</h1>
         <p>
-          HealthPal uses your location to find nearby clinics, hospitals,
-          doctors, and pharmacies, sorted by distance.
+          Speak or type freely. Your Therapist AI listens, reflects, and
+          responds out loud with empathetic, spoken support.
         </p>
       </div>
 
-      <div className="locate-row">
-        <select
-          className="radius-select"
-          value={radius}
-          onChange={(e) => setRadius(Number(e.target.value))}
-        >
-          {RADIUS_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              Within {opt.label}
-            </option>
-          ))}
-        </select>
-        <button className="btn btn-coral" onClick={findClinics} disabled={status === "locating" || status === "searching"}>
-          {status === "locating" || status === "searching" ? "Searching..." : "Use my location"}
-        </button>
+      <div className="disclaimer">
+        HealthPal's Therapist AI offers supportive conversation, not therapy
+        from a licensed professional. If you are in crisis or thinking about
+        harming yourself, please contact a local crisis line or emergency
+        services right away.
       </div>
 
-      {status === "locating" && <p className="status-line">Getting your location...</p>}
-      {status === "searching" && <p className="status-line">Searching nearby clinics...</p>}
-      {status === "done" && (
-        <p className="status-line">
-          {clinics.length > 0
-            ? "Found " + clinics.length + " place(s) within " + (radius / 1000) + " km."
-            : "No clinics found in this radius. Try a larger radius."}
+      <div className="chat-shell">
+        <div className="chat-messages" ref={scrollRef}>
+          {messages.map((m, i) => (
+            <div key={i} className={"msg " + m.role}>
+              {m.content}
+            </div>
+          ))}
+          {loading && <div className="msg system-note">Listening and thinking...</div>}
+          {error && <div className="msg system-note">{error}</div>}
+        </div>
+        <div className="chat-input-row">
+          {voiceSupported && (
+            <button
+              className={"btn btn-ghost btn-mic " + (listening ? "listening" : "")}
+              onClick={toggleListening}
+              title={listening ? "Stop listening" : "Speak"}
+              type="button"
+            >
+              {listening ? "Listening" : "Speak"}
+            </button>
+          )}
+          <textarea
+            rows={1}
+            placeholder="Share what is on your mind..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+          <button className="btn btn-coral" onClick={sendMessage} disabled={loading}>
+            Send
+          </button>
+        </div>
+      </div>
+
+      <label className="speak-toggle">
+        <input
+          type="checkbox"
+          checked={speakEnabled}
+          onChange={(e) => {
+            setSpeakEnabled(e.target.checked);
+            if (!e.target.checked && typeof window !== "undefined" && window.speechSynthesis) {
+              window.speechSynthesis.cancel();
+            }
+          }}
+        />
+        Read responses out loud
+      </label>
+
+      {!voiceSupported && (
+        <p className="voice-note">
+          Voice input is not supported in this browser. Try Chrome on
+          desktop or Android for speech-to-text. Typed chat and spoken
+          replies still work everywhere.
         </p>
       )}
-      {error && <p className="status-line">{error}</p>}
-
-      <div className="clinic-list">
-        {clinics.map((c) => (
-          <a
-            key={c.id}
-            className="clinic-card"
-            href={"https://www.openstreetmap.org/?mlat=" + c.lat + "&mlon=" + c.lon + "#map=18/" + c.lat + "/" + c.lon}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <div>
-              <div className="name">{c.name}</div>
-              <div className="meta">
-                {c.type ? c.type.charAt(0).toUpperCase() + c.type.slice(1) : "Clinic"} · {c.address}
-              </div>
-            </div>
-            <div className="distance">{c.distance.toFixed(1)} km</div>
-          </a>
-        ))}
-      </div>
     </main>
   );
 }
